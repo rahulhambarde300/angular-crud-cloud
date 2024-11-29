@@ -1,0 +1,31 @@
+<nav class="navbar navbar-expand-lg navbar-transparent">
+  <div class="container-fluid">
+    <div class="navbar-header">
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" aria-expanded="false" aria-label="Toggle navigation" (click)="sidebarToggle()">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <a class="navbar-brand" href="#">Flight42</a>
+    </div>
+    <div class="collapse navbar-collapse">
+      <div class="nav navbar-nav ms-auto" *ngIf="isAuthenticated; else noAuth">
+        <ul class="nav navbar-nav ms-auto justify-content-center align-items-center">
+          <li class="nav-item">
+              <a href ="#"  class="rounded-circle text-white d-flex justify-content-center align-items-center me-2" 
+                  style="width: 40px; height: 40px; font-weight: bold; text-decoration: none; background-color: #68B3C8;">
+                {{ usernameInitials }}
+              </a>
+          </li>
+        
+          <li class="nav-item">
+            <button (click)="logout()" class="btn btn-default">Logout</button>
+          </li>
+        </ul>
+      </div>
+      <ng-template #noAuth>
+        <div class="nav navbar-nav ms-auto">
+          <button (click)="login()" class="btn btn-default">Login</button>
+        </div>
+      </ng-template>
+    </div>
+  </div>
+</nav>
