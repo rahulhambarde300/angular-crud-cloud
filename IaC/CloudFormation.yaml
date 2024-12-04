@@ -1,260 +1,488 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: CloudFormation template to launch JARVIS
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Cloud formation template for Angular-CRUD
+
 
 Resources:
-  S3Bucket:
-    Type: AWS::S3::Bucket
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
     Properties:
-      BucketName: jarvis-transcriptions
-      OwnershipControls:
-        Rules: 
-          - ObjectOwnership: ObjectWriter
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: false
-        BlockPublicPolicy: false
-        IgnorePublicAcls: false
-        RestrictPublicBuckets: false
-      LifecycleConfiguration:
-        Rules:
-          - Id: 'TemporaryFilesLifecycleRule'
-            Status: 'Enabled'
-            ExpirationInDays: 1
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  # Subnets
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route Table and Route
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  RouteTableAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  RouteTableAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  # Security Group for Load Balancer
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and HTTPS traffic to the ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Load Balancer
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: myloadbalancer
+      Scheme: internet-facing
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: MyTargetGroup
+      Port: 4200
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 4200
+      HealthCheckPath: /
+
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: arn:aws:iam::562896989310:server-certificate/ELB-CRUD
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # HTTP Listener Redirecting to HTTPS
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
   
-  transcribeAudioQuery:
+  
+  # Security Group for EC2 Instances
+  EC2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic from the ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 4200
+          ToPort: 4200
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: 
+      - CognitoUserPoolClient
+      - CognitoUserPoolDomain
+      - FlightsFunction
+      - HotelsFunction
+    Properties:
+      LaunchTemplateName: MyLaunchTemplate
+      LaunchTemplateData:
+        InstanceType: t2.medium
+        KeyName: vockey
+        SecurityGroupIds:
+          - !Ref EC2InstanceSecurityGroup
+        ImageId: ami-0453ec754f44f9a4a
+        UserData:
+          Fn::Base64: 
+            !Sub |
+              #!/bin/bash
+              sudo yum update -y
+              sudo yum install -y docker
+
+              sudo systemctl start docker
+              sudo systemctl enable docker
+              sudo usermod -aG docker ec2-user
+
+              # Run the Docker container
+              sudo docker run -d --name angular-app -p 4200:4200 rahulh300/angular-crud
+              # Wait for the container to be ready
+              sleep 10
+
+              export USER_POOL_CLIENT_ID="${CognitoUserPoolClient}"
+              export COGNITO_AUTHORITY="https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+              export COGNITO_DOMAIN="https://${CognitoUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+              export FLIGHTS_API_URL="${FlightsFunctionUrl.FunctionUrl}",
+              export HOTELS_API_URL="${HotelsFunctionUrl.FunctionUrl}"
+              export EMAILS_API_URL="${EmailsFunctionUrl.FunctionUrl}"
+              
+              sudo docker exec angular-app sh -c "
+                echo \"export const environment = {\" > /app/src/environments/environment.ts &&
+                echo \"  production: false,\" >> /app/src/environments/environment.ts &&
+                echo \"  CLIENT_ID: '$USER_POOL_CLIENT_ID',\" >> /app/src/environments/environment.ts &&
+                echo \"  AUTHORITY: '$COGNITO_AUTHORITY',\" >> /app/src/environments/environment.ts &&
+                echo \"  DOMAIN: '$COGNITO_DOMAIN',\" >> /app/src/environments/environment.ts &&
+                echo \"  FLIGHTS_API_URL: '$FLIGHTS_API_URL',\" >> /app/src/environments/environment.ts &&
+                echo \"  HOTELS_API_URL: '$HOTELS_API_URL',\" >> /app/src/environments/environment.ts &&
+                echo \"  EMAIL_API_URL: '$EMAILS_API_URL'\" >> /app/src/environments/environment.ts &&
+                echo \"};\" >> /app/src/environments/environment.ts
+              "
+
+              sudo docker restart angular-app
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: angular-crud
+      UsernameConfiguration:
+        CaseSensitive: false 
+      AliasAttributes: 
+        - email 
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationLambdaFunction.Arn
+      
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: LoadBalancer
+    Properties:
+      ClientName: angular-crud
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - profile
+        - email
+        - phone
+        - openid
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Sub "https://${LoadBalancer.DNSName}/home"
+      LogoutURLs:
+        - !Sub "https://${LoadBalancer.DNSName}/logout"
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: angular-crud-dal
+      UserPoolId: !Ref CognitoUserPool
+  
+  PostConfirmationLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: transcribeAudioQuery
+      FunctionName: PostConfirmationTrigger
       Handler: index.handler
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
       Runtime: nodejs20.x
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
       Code:
         ZipFile: |
-          import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-          import { TranscribeClient, StartTranscriptionJobCommand } from '@aws-sdk/client-transcribe';
+          const { SNSClient, SubscribeCommand } = require('@aws-sdk/client-sns');
 
-          const s3Client = new S3Client({ region: 'us-east-1' });
-          const transcribeClient = new TranscribeClient({ region: 'us-east-1' });
+          const snsClient = new SNSClient({ region: 'us-east-1' });
+          const topicArn = process.env.TOPIC_ARN;
 
-          export const handler = async (event) => {
-            const bucketName = 'jarvis-transcriptions';
-            const fileName = 'jarvis-transcription-file' + Date.now();
-            const jobName = 'jarvis-transcription' + Date.now();
-            const { fileContent } = JSON.parse(event.body);
-            const fileCont = Buffer.from(fileContent, 'base64');
-
+          exports.handler = async (event) => {
             try {
-              await uploadAudioFileToS3(bucketName, fileName, fileCont);
-              await startTranscription(bucketName, fileName, jobName);
+              if (event.triggerSource === 'PostConfirmation_ConfirmSignUp') {
+                const email = event.request.userAttributes.email;
 
-              return {
-                statusCode: 200,
-                headers: {
-                  'Access-Control-Allow-Headers': 'Content-Type',
-                  'Access-Control-Allow-Origin': '*',
-                  'Access-Control-Allow-Methods': 'OPTIONS,POST',
-                },
-                body: JSON.stringify({ message: 'Transcription job started', jobName }),
-              };
+                if (!email) {
+                  throw new Error('Email is required for subscription.');
+                }
+
+                const subscribeParams = {
+                  Protocol: 'EMAIL',
+                  Endpoint: email,
+                  TopicArn: topicArn,
+                };
+
+                const command = new SubscribeCommand(subscribeParams);
+                await snsClient.send(command);
+
+                console.log(`Successfully subscribed ${email} to SNS topic.`);
+              }
+
+              return event;
             } catch (error) {
-              console.error('Error occurred:', error);
-              return {
-                statusCode: 500,
-                headers: {
-                  'Access-Control-Allow-Headers': 'Content-Type',
-                  'Access-Control-Allow-Origin': '*',
-                  'Access-Control-Allow-Methods': 'OPTIONS,POST',
-                },
-                body: JSON.stringify({ error: error.message }),
-              };
+              console.error('Error in post-confirmation trigger:', error);
+              throw error;
             }
-          };
+          }
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref NewFlightSNSTopic
 
-          const uploadAudioFileToS3 = async (bucketName, fileName, fileContent) => {
-            const params = {
-              Bucket: bucketName,
-              Key: fileName,
-              Body: fileContent,
-            };
+  CognitoLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostConfirmationLambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
 
-            const command = new PutObjectCommand(params);
-            return s3Client.send(command);
-          };
+  FlightsTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      TableName: flight
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: N
+      KeySchema: 
+        - AttributeName: id
+          KeyType: HASH 
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: false
+      Tags:
+        - Key: Environment
+          Value: Development
 
-          const startTranscription = (bucketName, fileName, jobName) => {
-            const params = {
-              TranscriptionJobName: jobName,
-              LanguageCode: 'en-US',
-              Media: {
-                MediaFileUri: `s3://${bucketName}/${fileName}`,
-              },
-              OutputBucketName: bucketName,
-            };
+  HotelsTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      TableName: hotel
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: N
+      KeySchema: 
+        - AttributeName: id
+          KeyType: HASH 
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: false
+      Tags:
+        - Key: Environment
+          Value: Development
 
-            const command = new StartTranscriptionJobCommand(params);
-            return transcribeClient.send(command);
-          };
-
-
-
-
-  getTranscriptionResult:
+  FlightsFunction:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: getTranscriptionResult
+      FunctionName: flights
       Handler: index.handler
       Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
       Runtime: nodejs20.x
       Code:
         ZipFile: |
-          import { TranscribeClient, GetTranscriptionJobCommand } from "@aws-sdk/client-transcribe";
-          import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const {
+            DynamoDBDocumentClient,
+            GetCommand,
+            PutCommand,
+            ScanCommand,
+            DeleteCommand,
+          } = require("@aws-sdk/lib-dynamodb");
 
-          const transcribeClient = new TranscribeClient();
-          const s3Client = new S3Client();
+          const client = new DynamoDBClient({});
+          const ddbDocClient = DynamoDBDocumentClient.from(client);
 
-          export const handler = async (event) => {
-              const jobName = event.queryStringParameters.jobName;
+          const TABLE_NAME = "flight";
 
-              try {
-                  const job = await getTranscriptionResult(jobName);
-
-                  if (job.TranscriptionJob.TranscriptionJobStatus === 'COMPLETED') {
-                      const transcriptFileUri = job.TranscriptionJob.Transcript.TranscriptFileUri;
-                      const transcriptContent = await getTranscriptContent(transcriptFileUri);
-
-                      return {
-                          statusCode: 200,
-                          headers: {
-                              "Access-Control-Allow-Headers": "Content-Type",
-                              "Access-Control-Allow-Origin": "*",
-                              "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
-                          },
-                          body: JSON.stringify({
-                              jobStatus: 'COMPLETED',
-                              transcript: transcriptContent
-                          })
-                      };
-                  } else {
-                      return {
-                          statusCode: 200,
-                          headers: {
-                              "Access-Control-Allow-Headers": "Content-Type",
-                              "Access-Control-Allow-Origin": "*",
-                              "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
-                          },
-                          body: JSON.stringify({
-                              jobStatus: 'IN_PROGRESS'
-                          })
-                      };
-                  }
-              } catch (error) {
-                  console.error("Error: ", error);
-                  return {
-                      statusCode: 500,
-                      headers: {
-                          "Access-Control-Allow-Headers": "Content-Type",
-                          "Access-Control-Allow-Origin": "*",
-                          "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
-                      },
-                      body: JSON.stringify({ error: error.message })
-                  };
-              }
-          };
-
-          const getTranscriptionResult = async (jobName) => {
-              const params = {
-                  TranscriptionJobName: jobName,
-              };
-              const command = new GetTranscriptionJobCommand(params);
-              return transcribeClient.send(command);
-          };
-
-          const getTranscriptContent = async (transcriptFileUri) => {
-              const url = new URL(transcriptFileUri);
-              
-              
-              const urlArray = url.pathname.split("/");
-              const bucketName = urlArray[1];
-              const key = urlArray[2];
-
-              console.log("url:"+url+", bucketName:"+bucketName+",key:"+key);
-              const params = {
-                  Bucket: bucketName,
-                  Key: key
-              };
-              
-              const command = new GetObjectCommand(params);
-              const response = await s3Client.send(command);
-
-              const stream = response.Body;
-              const chunks = [];
-              for await (const chunk of stream) {
-                  chunks.push(chunk);
-              }
-              const body = Buffer.concat(chunks).toString('utf-8');
-              const transcriptData = JSON.parse(body);
-
-              return transcriptData;
-          };
-
-  synthesizeSpeech:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: synthesizeSpeech
-      Handler: index.handler
-      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
-      Runtime: nodejs20.x
-      Code:
-        ZipFile: |
-          import { PollyClient, SynthesizeSpeechCommand } from "@aws-sdk/client-polly";
-
-          const pollyClient = new PollyClient({ region: "us-east-1" });
-
-          export const handler = async (event) => {
+          exports.handler = async (event) => {
             try {
-              const {text} = JSON.parse(event.body);
-              const textMsg = text || "Hello, this is a test message from AWS Polly.";
+              const httpMethod = event.httpMethod || event.requestContext.http.method;
+              const queryStringParameters = event.queryStringParameters;
+              const body = event.body;
 
-              const params = {
-                Text: textMsg,
-                OutputFormat: "mp3",
-                VoiceId: "Joanna",
-              };
+              console.log(event, httpMethod, body, queryStringParameters);
+              const id_query = queryStringParameters?.id;
+              const from_query = queryStringParameters?.from;
+              const to_query = queryStringParameters?.to;
 
-              const command = new SynthesizeSpeechCommand(params);
-              const response = await pollyClient.send(command);
+              if (httpMethod === "GET") {
+                if (id_query) {
+                  const getCommand = new GetCommand({
+                    TableName: TABLE_NAME,
+                    Key: { id: Number(id_query) },
+                  });
 
-              const audioStream = response.AudioStream;
-              let audioChunks = [];
-              for await (const chunk of audioStream) {
-                audioChunks.push(chunk);
+                  const result = await ddbDocClient.send(getCommand);
+                  return {
+                    statusCode: 200,
+                    body: JSON.stringify(result.Item || { message: "Flight not found" }),
+                  };
+                }
+
+                const scanCommand = new ScanCommand({ TableName: TABLE_NAME });
+                const result = await ddbDocClient.send(scanCommand);
+                const filteredItems = result.Items.filter((item) => {
+                  let matches = true;
+                  if (from_query) matches = matches && item.from === from_query;
+                  if (to_query) matches = matches && item.to === to_query;
+                  return matches;
+                });
+                return {
+                  statusCode: 200,
+                  body: JSON.stringify(filteredItems || []),
+                };
+              } else if (httpMethod === "POST") {
+                const { id, from, to, date } = JSON.parse(body);
+
+                if (!id || !from || !to || !date) {
+                  return {
+                    statusCode: 400,
+                    body: JSON.stringify({ message: "Missing required fields" }),
+                  };
+                }
+
+                const putCommand = new PutCommand({
+                  TableName: TABLE_NAME,
+                  Item: { id: Number(id), from, to, date },
+                });
+
+                await ddbDocClient.send(putCommand);
+                return {
+                  statusCode: 201,
+                  body: JSON.stringify({ message: "Flight added successfully" }),
+                };
+              } else if (httpMethod === "DELETE") {
+                const { id } = queryStringParameters;
+
+                if (!id) {
+                  return {
+                    statusCode: 400,
+                    body: JSON.stringify({ message: "Missing flight ID" }),
+                  };
+                }
+
+                const deleteCommand = new DeleteCommand({
+                  TableName: TABLE_NAME,
+                  Key: { id: Number(id) },
+                });
+
+                await ddbDocClient.send(deleteCommand);
+                return {
+                  statusCode: 200,
+                  body: JSON.stringify({ message: "Flight deleted successfully" }),
+                };
+              } else {
+                return {
+                  statusCode: 405,
+                  body: JSON.stringify({ message: "Method Not Allowed" }),
+                };
               }
-              const audioBuffer = Buffer.concat(audioChunks);
-              const base64Audio = audioBuffer.toString("base64");;
-
-              return {
-                statusCode: 200,
-                headers: {
-                  "Access-Control-Allow-Headers": "Content-Type",
-                  "Access-Control-Allow-Origin": "*",
-                  "Access-Control-Allow-Methods": "OPTIONS,POST",
-                },
-                body: JSON.stringify({
-                  message: "Speech synthesis successful.",
-                  audio: base64Audio,
-                }),
-              };
             } catch (error) {
-              console.error("Error while synthesizing speech:", error);
+              console.error("Error:", error);
               return {
                 statusCode: 500,
-                headers: {
-                  "Access-Control-Allow-Headers": "Content-Type",
-                  "Access-Control-Allow-Origin": "*",
-                  "Access-Control-Allow-Methods": "OPTIONS,POST",
-                },
                 body: JSON.stringify({
-                  message: "Error while synthesizing speech.",
+                  message: "Internal Server Error",
                   error: error.message,
                 }),
               };
@@ -262,219 +490,284 @@ Resources:
           };
 
 
-  APIGateway:
-    Type: AWS::ApiGateway::RestApi
-    Properties:
-      Name: Jarvis
-      Description: API Gateway for Jarvis API
-      EndpointConfiguration:
-        Types:
-          - REGIONAL
 
-  TranscriptionResource:
-    Type: AWS::ApiGateway::Resource
+  HotelsFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      ParentId: !GetAtt APIGateway.RootResourceId
-      PathPart: transcribe
-      RestApiId: !Ref APIGateway
+      FunctionName: hotels
+      Handler: index.handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Runtime: nodejs20.x
+      Code:
+        ZipFile: |
+          const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
+          const {
+            DynamoDBDocumentClient,
+            GetCommand,
+            PutCommand,
+            ScanCommand,
+            DeleteCommand,
+          } = require("@aws-sdk/lib-dynamodb");
+
+          // Initialize DynamoDB clients
+          const client = new DynamoDBClient({});
+          const ddbDocClient = DynamoDBDocumentClient.from(client);
+
+          // Constants
+          const TABLE_NAME = "hotel";
+
+          // Lambda handler
+          exports.handler = async (event) => {
+            try {
+              const httpMethod = event.httpMethod || event.requestContext.http.method;
+              const queryStringParameters = event.queryStringParameters;
+              const body = event.body;
+
+              console.log("Event:", event);
+              console.log("HTTP Method:", httpMethod);
+              console.log("Body:", body);
+              console.log("Query Parameters:", queryStringParameters);
+              const id_query = queryStringParameters?.id;
+              const city_query = queryStringParameters?.city;
+
+              switch (httpMethod) {
+                case "GET":
+                  if (id_query) {
+                    // Retrieve a specific hotel by ID
+                    const getCommand = new GetCommand({
+                      TableName: TABLE_NAME,
+                      Key: { id: Number(id_query) },
+                    });
+                    const result = await ddbDocClient.send(getCommand);
+
+                    return {
+                      statusCode: 200,
+                      body: JSON.stringify(result.Item || { message: "Hotel not found" }),
+                    };
+                  }
+
+                  // Retrieve all hotels
+                  const scanCommand = new ScanCommand({ TableName: TABLE_NAME });
+                  const result = await ddbDocClient.send(scanCommand);
+                  const filteredItems = result.Items.filter((item) => {
+                    let matches = true;
+                    if (city_query) matches = matches && item.city === city_query;
+                    return matches;
+                  });
+                  return {
+                    statusCode: 200,
+                    body: JSON.stringify(filteredItems || []),
+                  };
+
+                case "POST":
+                  // Add a new hotel
+                  const { id, name, city, stars } = JSON.parse(body);
+
+                  if (!name || !city || !stars) {
+                    return {
+                      statusCode: 400,
+                      body: JSON.stringify({ message: "Missing required fields" }),
+                    };
+                  }
+                  let newID = id ? id : Math.floor(Math.random() * 1000000);
+                  const putCommand = new PutCommand({
+                    TableName: TABLE_NAME,
+                    Item: { id: Number(newID), name, city, stars },
+                  });
+                  await ddbDocClient.send(putCommand);
+
+                  return {
+                    statusCode: 201,
+                    body: JSON.stringify({ message: "Hotel added successfully" }),
+                  };
+
+                case "DELETE":
+                  // Delete a hotel by ID
+                  const { id: deleteId } = queryStringParameters;
+
+                  if (!deleteId) {
+                    return {
+                      statusCode: 400,
+                      body: JSON.stringify({ message: "Missing hotel ID" }),
+                    };
+                  }
+
+                  const deleteCommand = new DeleteCommand({
+                    TableName: TABLE_NAME,
+                    Key: { id: Number(deleteId) },
+                  });
+                  await ddbDocClient.send(deleteCommand);
+
+                  return {
+                    statusCode: 200,
+                    body: JSON.stringify({ message: "Hotel deleted successfully" }),
+                  };
+
+                default:
+                  // Unsupported HTTP method
+                  return {
+                    statusCode: 405,
+                    body: JSON.stringify({ message: "Method Not Allowed" }),
+                  };
+              }
+            } catch (error) {
+              console.error("Error:", error);
+
+              return {
+                statusCode: 500,
+                body: JSON.stringify({
+                  message: "Internal Server Error",
+                  error: error.message,
+                }),
+              };
+            }
+          };
+
+
+  EmailFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: sendEmail
+      Handler: index.handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Runtime: nodejs20.x
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref NewFlightSNSTopic
+      Code:
+        ZipFile: |
+          const { SNSClient, PublishCommand } = require('@aws-sdk/client-sns');
+
+          const snsClient = new SNSClient({ region: 'us-east-1' });
+
+          exports.handler = async (event) => {
+            try {
+              const message = JSON.parse(event.body);
+              
+              const { from, to, date } = message;
+
+              const notificationMessage = `New Flight Added:
+          From: ${from}
+          To: ${to}
+          Date: ${date}`;
+
+              const params = {
+                Message: notificationMessage,
+                Subject: `New Flight Notification`,
+                TopicArn: process.env.TOPIC_ARN,
+              };
+
+              const command = new PublishCommand(params);
+              await snsClient.send(command);
+
+              return {
+                statusCode: 200,
+                body: JSON.stringify({ message: 'Notification sent successfully.' }),
+              };
+            } catch (error) {
+              console.error(error);
+              return {
+                statusCode: 500,
+                body: JSON.stringify({ message: 'Failed to send notification.', error: error.message }),
+              };
+            }
+          };
+
+  NewFlightSNSTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: 'NewFlight'
+      DisplayName: 'New Flight Notifications' 
+
+          
+  FlightsFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt FlightsFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowOrigins: ["*"] 
+        AllowMethods: ["GET", "POST", "DELETE"]
+        AllowHeaders: ["*"]  
+        MaxAge: 3600
   
-  GetTranscriptionResultResource:
-    Type: AWS::ApiGateway::Resource
+  FlightsFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
     Properties:
-      ParentId: !GetAtt APIGateway.RootResourceId
-      PathPart: getTransriptionResult
-      RestApiId: !Ref APIGateway
+      FunctionName: !Ref FlightsFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  HotelsFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt HotelsFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowOrigins: ["*"]
+        AllowMethods: ["GET", "POST", "DELETE"]
+        AllowHeaders: ["*"]  
+        MaxAge: 3600
+
+  HotelsFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HotelsFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
   
-  SynthesizeSpeechResource:
-    Type: AWS::ApiGateway::Resource
+  EmailsFunctionUrl:
+    Type: AWS::Lambda::Url
     Properties:
-      ParentId: !GetAtt APIGateway.RootResourceId
-      PathPart: synthesize
-      RestApiId: !Ref APIGateway
-
-  TranscribeOptionsMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: OPTIONS
-      ResourceId: !Ref TranscriptionResource
-      RestApiId: !Ref APIGateway
-      Integration:
-        Type: MOCK
-        PassthroughBehavior: WHEN_NO_MATCH
-        RequestTemplates:
-          application/json: '{"statusCode": 200}'
-        IntegrationResponses:
-          - StatusCode: 200
-            ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
-              method.response.header.Access-Control-Allow-Origin: "'*'"
-            ResponseTemplates:
-              application/json: '{"statusCode": 200}'
-      MethodResponses:
-        - StatusCode: 200
-          ResponseModels:
-            application/json: "Empty"
-          ResponseParameters:
-            method.response.header.Access-Control-Allow-Headers: true
-            method.response.header.Access-Control-Allow-Methods: true
-            method.response.header.Access-Control-Allow-Origin: true
-
-  TranscribeMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: POST
-      ResourceId: !Ref TranscriptionResource
-      RestApiId: !Ref APIGateway
-      Integration:
-        IntegrationHttpMethod: POST
-        Type: AWS_PROXY
-        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${transcribeAudioQuery.Arn}/invocations
-      MethodResponses:
-        - StatusCode: 200
-          ResponseModels:
-            application/json: "Empty"
-          ResponseParameters:
-            "method.response.header.Access-Control-Allow-Headers": true
-            "method.response.header.Access-Control-Allow-Methods": true
-            "method.response.header.Access-Control-Allow-Origin": true
-
-  GetTranscriptionResultOptionsMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: OPTIONS
-      ResourceId: !Ref GetTranscriptionResultResource
-      RestApiId: !Ref APIGateway
-      Integration:
-        Type: MOCK
-        PassthroughBehavior: WHEN_NO_MATCH
-        RequestTemplates:
-          application/json: '{"statusCode": 200}'
-        IntegrationResponses:
-          - StatusCode: 200
-            ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
-              method.response.header.Access-Control-Allow-Origin: "'*'"
-            ResponseTemplates:
-              application/json: '{"statusCode": 200}'
-      MethodResponses:
-        - StatusCode: 200
-          ResponseModels:
-            application/json: "Empty"
-          ResponseParameters:
-            method.response.header.Access-Control-Allow-Headers: true
-            method.response.header.Access-Control-Allow-Methods: true
-            method.response.header.Access-Control-Allow-Origin: true
-
-  GetTranscriptionResultMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: GET
-      ResourceId: !Ref GetTranscriptionResultResource
-      RestApiId: !Ref APIGateway
-      Integration:
-        IntegrationHttpMethod: POST
-        Type: AWS_PROXY
-        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${getTranscriptionResult.Arn}/invocations
-      MethodResponses:
-        - StatusCode: 200
-          ResponseModels:
-            application/json: "Empty"
-          ResponseParameters:
-            "method.response.header.Access-Control-Allow-Headers": true
-            "method.response.header.Access-Control-Allow-Methods": true
-            "method.response.header.Access-Control-Allow-Origin": true
-
-
-  SynthesizeSpeechOptionsMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: OPTIONS
-      ResourceId: !Ref SynthesizeSpeechResource
-      RestApiId: !Ref APIGateway
-      Integration:
-        Type: MOCK
-        PassthroughBehavior: WHEN_NO_MATCH
-        RequestTemplates:
-          application/json: '{"statusCode": 200}'
-        IntegrationResponses:
-          - StatusCode: 200
-            ResponseParameters:
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
-              method.response.header.Access-Control-Allow-Origin: "'*'"
-            ResponseTemplates:
-              application/json: '{"statusCode": 200}'
-      MethodResponses:
-        - StatusCode: 200
-          ResponseModels:
-            application/json: "Empty"
-          ResponseParameters:
-            method.response.header.Access-Control-Allow-Headers: true
-            method.response.header.Access-Control-Allow-Methods: true
-            method.response.header.Access-Control-Allow-Origin: true
-
-  SynthesizeSpeechMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      AuthorizationType: NONE
-      HttpMethod: POST
-      ResourceId: !Ref SynthesizeSpeechResource
-      RestApiId: !Ref APIGateway
-      Integration:
-        IntegrationHttpMethod: POST
-        Type: AWS_PROXY
-        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${synthesizeSpeech.Arn}/invocations
-      MethodResponses:
-        - StatusCode: 200
-          ResponseModels:
-            application/json: "Empty"
-          ResponseParameters:
-            "method.response.header.Access-Control-Allow-Headers": true
-            "method.response.header.Access-Control-Allow-Methods": true
-            "method.response.header.Access-Control-Allow-Origin": true
-
-  #Lambda permissions
-  TranscriptionPermission:
+      TargetFunctionArn: !GetAtt EmailFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowOrigins: ["*"] 
+        AllowMethods: ["GET", "POST", "DELETE"]
+        AllowHeaders: ["*"]  
+        MaxAge: 3600
+  
+  EmailsFunctionUrlPermission:
     Type: AWS::Lambda::Permission
     Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !GetAtt transcribeAudioQuery.Arn
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGateway}/*/*/*
+      FunctionName: !Ref EmailFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
 
-  GetTranscriptionResultPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !GetAtt getTranscriptionResult.Arn
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGateway}/*/*/*
+Outputs:
+  LoadBalancerDNS:
+    Description: DNS Name of the Load Balancer
+    Value: !GetAtt LoadBalancer.DNSName
 
-  SynthesizeSpeechPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !GetAtt synthesizeSpeech.Arn
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGateway}/*/*/*
+  UserPoolId:
+    Description: ID of the Cognito User Pool
+    Value: !Ref CognitoUserPool
 
-  APIDeployment:
-    Type: AWS::ApiGateway::Deployment
-    Properties:
-      RestApiId: !Ref APIGateway
-      StageName: prod
-    DependsOn:
-      - TranscribeOptionsMethod
-      - TranscribeMethod
-      - GetTranscriptionResultOptionsMethod
-      - GetTranscriptionResultMethod
-      - SynthesizeSpeechOptionsMethod
-      - SynthesizeSpeechMethod
+  UserPoolClientId:
+    Description: ID of the Cognito User Pool Client
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: UserPoolClientId
 
+  CognitoAuthority:
+    Description: Cognito Authority URL
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+    Export:
+      Name: CognitoAuthority
+
+  CognitoDomain:
+    Description: Cognito User Pool Domain
+    Value: !Sub "https://${CognitoUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+    Export:
+      Name: CognitoDomain
+  
+  FlightsFunctionURLADD:
+    Description: Flights function url
+    Value: !GetAtt FlightsFunctionUrl.FunctionUrl
+
+  HotelsFunctionURLADD:
+    Description: Hotels function url
+    Value: !GetAtt HotelsFunctionUrl.FunctionUrl
